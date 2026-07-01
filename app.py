@@ -4,73 +4,33 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import re
-import json
 
 # --- НАСТРОЙКА СТРАНИЦЫ ---
 st.set_page_config(page_title="Сборка заказов", layout="centered")
 
-# --- ФУНКЦИЯ ПОДКЛЮЧЕНИЯ К GOOGLE SHEETS (УЛУЧШЕННАЯ) ---
+# --- ФУНКЦИЯ ПОДКЛЮЧЕНИЯ К GOOGLE SHEETS (ИСПРАВЛЕННАЯ) ---
 def connect_to_gsheet():
-    """Подключение к Google Sheets с обработкой разных форматов секретов."""
+    """Подключение к Google Sheets с использованием вашего секрета."""
     try:
-        # Проверяем наличие секретов
-        if "google" not in st.secrets:
-            st.sidebar.error("❌ Секрет 'google' не найден. Проверьте настройки.")
-            st.sidebar.info("Доступные ключи: " + ", ".join(st.secrets.keys()))
+        # Проверяем наличие секрета с вашим именем
+        secret_key = "gcp_service_account"  # <-- ИЗМЕНЕНО
+        
+        if secret_key not in st.secrets:
+            st.sidebar.error(f"❌ Секрет '{secret_key}' не найден")
+            st.sidebar.info(f"Доступные секреты: {', '.join(st.secrets.keys())}")
             return None
 
-        google_secret = st.secrets["google"]
+        # Получаем данные из секрета
+        creds_dict = dict(st.secrets[secret_key])
         
-        # Пытаемся получить ключ в разных форматах
-        creds_dict = None
-        
-        # Вариант 1: если секрет это уже словарь
-        if isinstance(google_secret, dict):
-            # Проверяем, может быть это уже готовый JSON
-            if "type" in google_secret and "project_id" in google_secret:
-                creds_dict = google_secret
-            else:
-                # Может быть ключ вложен в поле "service_account_key"
-                if "service_account_key" in google_secret:
-                    key_data = google_secret["service_account_key"]
-                    if isinstance(key_data, str):
-                        try:
-                            creds_dict = json.loads(key_data)
-                        except:
-                            creds_dict = key_data
-                    else:
-                        creds_dict = key_data
-                # Или в поле "credentials"
-                elif "credentials" in google_secret:
-                    creds_dict = google_secret["credentials"]
-                # Или просто берем как есть
-                else:
-                    creds_dict = google_secret
-        
-        # Вариант 2: если секрет это строка
-        elif isinstance(google_secret, str):
-            try:
-                creds_dict = json.loads(google_secret)
-            except:
-                # Может это просто строка с JSON
-                st.sidebar.error("❌ Не удалось распарсить JSON")
+        # Проверяем обязательные поля
+        required_fields = ["private_key", "client_email", "project_id"]
+        for field in required_fields:
+            if field not in creds_dict:
+                st.sidebar.error(f"❌ Отсутствует поле '{field}' в секрете")
                 return None
-        
-        if creds_dict is None:
-            st.sidebar.error("❌ Не удалось найти данные для подключения")
-            return None
 
-        # Проверяем структуру ключа
-        if not isinstance(creds_dict, dict):
-            st.sidebar.error("❌ Данные не являются словарем")
-            return None
-            
-        if "private_key" not in creds_dict or "client_email" not in creds_dict:
-            st.sidebar.error("❌ Отсутствуют обязательные поля в ключе")
-            st.sidebar.info(f"Доступные поля: {', '.join(creds_dict.keys())}")
-            return None
-
-        # Подключаемся
+        # Подключаемся к Google Sheets
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
@@ -83,7 +43,7 @@ def connect_to_gsheet():
         st.sidebar.error(f"❌ Ошибка подключения: {e}")
         return None
 
-# --- ОСТАЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИЯ ЗАГРУЗКИ ДАННЫХ ---
 @st.cache_data(ttl=60)
 def load_all_data():
     """Загружает и объединяет данные из всех вкладок."""
@@ -134,6 +94,7 @@ def load_all_data():
         st.sidebar.error(f"❌ Ошибка загрузки: {e}")
         return None, None, None
 
+# --- ФУНКЦИЯ ОБОГАЩЕНИЯ ДАННЫХ ---
 def enrich_stock_with_ref(stock_df, ref_df):
     """Добавляет в остатки данные из справочника."""
     if stock_df is None or ref_df is None:
@@ -156,6 +117,7 @@ def enrich_stock_with_ref(stock_df, ref_df):
 
     return enriched_df
 
+# --- ФУНКЦИИ ПОИСКА ---
 def find_task(tasks_df, cell):
     try:
         if tasks_df is None or tasks_df.empty:
@@ -198,9 +160,9 @@ if 'cell_number' not in st.session_state:
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 
-# --- ЗАГРУЗКА ДАННЫХ ---
+# --- ЗАГРУЗКА ДАННЫХ ПРИ СТАРТЕ ---
 if not st.session_state.data_loaded:
-    with st.spinner("Загрузка данных..."):
+    with st.spinner("Загрузка данных из Google Sheets..."):
         tasks, stock, ref = load_all_data()
         if tasks is not None:
             st.session_state.tasks_df = tasks
@@ -208,9 +170,9 @@ if not st.session_state.data_loaded:
             st.session_state.ref_df = ref
             st.session_state.data_loaded = True
         else:
-            st.error("❌ Не удалось загрузить данные. Проверьте секреты.")
+            st.error("❌ Не удалось загрузить данные. Проверьте подключение.")
 
-# --- СТИЛИ ---
+# --- СТИЛИ ДЛЯ ТЕЛЕФОНА ---
 st.markdown("""
 <style>
     .stTextInput input {
@@ -252,22 +214,25 @@ st.markdown("""
 with st.sidebar:
     st.header("⚙️ Меню")
     
-    # Показываем статус секретов для отладки
-    with st.expander("🔍 Статус секретов"):
-        if "google" in st.secrets:
-            st.success("✅ Секрет 'google' найден")
-            google_secret = st.secrets["google"]
-            st.write(f"Тип: {type(google_secret)}")
-            if isinstance(google_secret, dict):
-                st.write(f"Ключи: {', '.join(google_secret.keys())}")
-                # Проверяем наличие обязательных полей
-                if "private_key" in google_secret:
+    # Показываем статус для отладки
+    with st.expander("🔍 Статус подключения"):
+        if "gcp_service_account" in st.secrets:
+            st.success("✅ Секрет 'gcp_service_account' найден")
+            secret = st.secrets["gcp_service_account"]
+            st.write(f"Тип: {type(secret)}")
+            if isinstance(secret, dict):
+                st.write(f"Доступные поля: {', '.join(secret.keys())}")
+                if "private_key" in secret:
                     st.success("✅ Найден private_key")
-                if "client_email" in google_secret:
+                if "client_email" in secret:
                     st.success("✅ Найден client_email")
+                if "project_id" in secret:
+                    st.success("✅ Найден project_id")
         else:
-            st.error("❌ Секрет 'google' не найден")
+            st.error("❌ Секрет 'gcp_service_account' не найден")
             st.write("Доступные секреты:", list(st.secrets.keys()))
+
+    st.divider()
 
     if st.button("📋 Задания", use_container_width=True):
         st.session_state.step = 'main'
@@ -279,6 +244,7 @@ with st.sidebar:
 
     st.divider()
 
+    # Статистика
     tasks_count = len(st.session_state.tasks_df) if st.session_state.tasks_df is not None else 0
     done_count = len(st.session_state.completed)
     st.metric("📦 Заданий", f"{done_count}/{tasks_count}")
@@ -288,6 +254,253 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# --- ОСНОВНОЙ КОД (без изменений) ---
-# ... (продолжение кода с main, scan, imei, finish, report)
-# Я опустил остальную часть для краткости, но она должна быть полностью скопирована из предыдущего ответа
+    if st.button("🔄 Сбросить сессию", use_container_width=True):
+        for key in ['step', 'current_task', 'current_stock', 'scanned', 'imeis', 'cell_number']:
+            if key in st.session_state:
+                if key == 'step':
+                    st.session_state[key] = 'main'
+                elif key == 'scanned':
+                    st.session_state[key] = []
+                elif key == 'imeis':
+                    st.session_state[key] = []
+                else:
+                    st.session_state[key] = None
+        st.rerun()
+
+# --- ГЛАВНЫЙ ЭКРАН ---
+if st.session_state.step == 'main':
+    st.title("📦 Сборка")
+
+    if st.session_state.tasks_df is not None and not st.session_state.tasks_df.empty:
+        st.subheader("📋 Активные задания")
+
+        for idx, row in st.session_state.tasks_df.iterrows():
+            # Проверяем, выполнено ли
+            is_done = any(c.get('Номер заказа') == row['Номер заказа'] for c in st.session_state.completed)
+
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"""
+                    <div class="task-card">
+                        <b>📍 {row['Место']}</b><br>
+                        {row['Наименование товара']}<br>
+                        <small>Заказ: {row['Номер заказа']}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    if not is_done:
+                        if st.button(f"▶️", key=f"btn_{idx}", use_container_width=True):
+                            st.session_state.cell_number = row['Место']
+                            task = find_task(st.session_state.tasks_df, row['Место'])
+                            if task is not None:
+                                stock = find_stock(st.session_state.stock_df, task['Артикул/Код OZON'])
+                                if stock is not None:
+                                    st.session_state.current_task = task
+                                    st.session_state.current_stock = stock
+                                    st.session_state.scanned = []
+                                    st.session_state.imeis = []
+                                    st.session_state.step = 'scan'
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ Товар с артикулом {task['Артикул/Код OZON']} не найден в остатках")
+                    else:
+                        st.success("✅")
+    else:
+        st.warning("⚠️ Нет активных заданий")
+        if st.button("🔄 Загрузить данные", use_container_width=True):
+            st.session_state.data_loaded = False
+            st.cache_data.clear()
+            st.rerun()
+
+# --- СКАНИРОВАНИЕ ---
+elif st.session_state.step == 'scan':
+    task = st.session_state.current_task
+    stock = st.session_state.current_stock
+
+    if task is None:
+        st.error("Ошибка: задание не найдено")
+        if st.button("Назад"):
+            st.session_state.step = 'main'
+            st.rerun()
+    else:
+        st.subheader(f"📍 {task['Место']}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("📦", task['Наименование товара'][:20] + "...")
+        with col2:
+            st.metric("📱", task['Артикул/Код OZON'])
+
+        # Прогресс
+        total = int(task['Кол-во'])
+        scanned = len(st.session_state.scanned)
+        st.progress(scanned / total if total > 0 else 0)
+        st.caption(f"Отсканировано: {scanned} из {total}")
+
+        # Поле для сканирования
+        barcode = st.text_input("📷 Баркод", placeholder="Сканируйте...", key="barcode_input")
+
+        if barcode:
+            if barcode.strip() == str(task['Артикул/Код OZON']).strip():
+                st.session_state.scanned.append(barcode)
+                st.success(f"✅ {len(st.session_state.scanned)}/{total}")
+
+                # Проверяем IMEI
+                if stock is not None and stock.get('Имеи', '').lower() == 'да':
+                    st.session_state.imeis = []
+                    st.session_state.step = 'imei'
+                    st.rerun()
+                else:
+                    if len(st.session_state.scanned) >= total:
+                        st.session_state.step = 'finish'
+                        st.rerun()
+                    else:
+                        st.rerun()
+            else:
+                st.error("❌ Неверный баркод")
+
+        # Кнопка завершения
+        if scanned >= total:
+            if st.button("✅ Завершить", use_container_width=True):
+                st.session_state.step = 'finish'
+                st.rerun()
+
+        if st.button("🔙 Назад", use_container_width=True):
+            st.session_state.step = 'main'
+            st.rerun()
+
+# --- ВВОД IMEI ---
+elif st.session_state.step == 'imei':
+    stock = st.session_state.current_stock
+    task = st.session_state.current_task
+
+    st.subheader(f"📱 IMEI")
+    st.write(f"**{task['Наименование товара']}**")
+
+    # Определяем сколько IMEI нужно ввести
+    has_imei1 = pd.notna(stock.get('Имеи1', '')) and str(stock.get('Имеи1', '')).strip() != ''
+    has_imei2 = pd.notna(stock.get('Имеи2', '')) and str(stock.get('Имеи2', '')).strip() != ''
+
+    current = len(st.session_state.imeis)
+
+    if current == 0:
+        st.write("**Введите IMEI 1**")
+        label = "IMEI 1"
+        placeholder = "15 цифр"
+    elif has_imei2 and current == 1:
+        st.write("**Введите IMEI 2 (или 0, если нет)**")
+        label = "IMEI 2"
+        placeholder = "15 цифр или 0"
+    else:
+        st.session_state.step = 'finish'
+        st.rerun()
+
+    imei_input = st.text_input(label, placeholder=placeholder, key="imei_input")
+
+    if imei_input:
+        if imei_input == '0' or re.match(r'^\d{15}$', imei_input):
+            st.session_state.imeis.append(imei_input)
+            st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
+
+            # Проверяем, нужно ли еще IMEI
+            if has_imei2 and len(st.session_state.imeis) < 2:
+                st.rerun()
+            else:
+                st.session_state.step = 'finish'
+                st.rerun()
+        else:
+            st.error("❌ Введите 15 цифр или 0")
+
+    if st.button("🔙 Назад"):
+        st.session_state.step = 'scan'
+        st.rerun()
+
+# --- ЗАВЕРШЕНИЕ ---
+elif st.session_state.step == 'finish':
+    task = st.session_state.current_task
+    stock = st.session_state.current_stock
+
+    st.balloons()
+    st.success("✅ Готово!")
+
+    # Формируем запись
+    record = {
+        'Номер заказа': task['Номер заказа'],
+        'Наименование товара': task['Наименование товара'],
+        'Артикул/Код OZON': task['Артикул/Код OZON'],
+        'Кол-во': task['Кол-во'],
+        '№ поставки': stock.get('№ поставки', '') if stock is not None else '',
+        '№ ГТД': stock.get('№ ГТД', '') if stock is not None else '',
+        'Имеи': stock.get('Имеи', 'Нет') if stock is not None else 'Нет',
+        'Длина': stock.get('Длина', '') if stock is not None else '',
+        'Ширина': stock.get('Ширина', '') if stock is not None else '',
+        'Высота': stock.get('Высота', '') if stock is not None else '',
+        'вес': stock.get('вес', '') if stock is not None else '',
+        'Имеи1': st.session_state.imeis[0] if len(st.session_state.imeis) > 0 else '',
+        'Имеи2': st.session_state.imeis[1] if len(st.session_state.imeis) > 1 else '',
+        'Время отбора': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'Место': st.session_state.cell_number
+    }
+    st.session_state.completed.append(record)
+
+    # Кнопки
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📋 К списку", use_container_width=True):
+            st.session_state.step = 'main'
+            st.session_state.current_task = None
+            st.session_state.current_stock = None
+            st.session_state.scanned = []
+            st.session_state.imeis = []
+            st.rerun()
+    with col2:
+        if st.button("📊 Отчет", use_container_width=True):
+            st.session_state.step = 'report'
+            st.rerun()
+
+# --- ОТЧЕТ ---
+elif st.session_state.step == 'report':
+    st.title("📊 Отчет")
+
+    if st.session_state.completed:
+        df = pd.DataFrame(st.session_state.completed)
+        st.dataframe(df, use_container_width=True)
+
+        # Скачать CSV
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Скачать CSV",
+            csv,
+            f"отчет_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            "text/csv"
+        )
+
+        # Сохранить в Google Sheets
+        if st.button("💾 Сохранить в Google Sheets", use_container_width=True):
+            sh = connect_to_gsheet()
+            if sh:
+                try:
+                    report_name = f"Отчет_{datetime.now().strftime('%Y-%m-%d')}"
+                    try:
+                        old_ws = sh.worksheet(report_name)
+                        sh.del_worksheet(old_ws)
+                    except:
+                        pass
+                    ws = sh.add_worksheet(title=report_name, rows="1000", cols="20")
+                    ws.append_row(list(df.columns))
+                    for _, row in df.iterrows():
+                        ws.append_row(row.astype(str).tolist())
+                    st.success(f"✅ Отчет сохранен в вкладку '{report_name}'!")
+                except Exception as e:
+                    st.error(f"❌ Ошибка сохранения: {e}")
+            else:
+                st.error("❌ Нет подключения к Google Sheets")
+
+        st.caption(f"Всего выполнено: {len(df)} заданий")
+    else:
+        st.info("Нет выполненных заданий")
+
+    if st.button("🔙 На главную", use_container_width=True):
+        st.session_state.step = 'main'
+        st.rerun()
