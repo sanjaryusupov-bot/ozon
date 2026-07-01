@@ -497,36 +497,38 @@ elif st.session_state.step == 'imei':
             else:
                 st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
         
-        # Если есть ошибка, не выходим из блока, а показываем кнопку
+        # Кнопка назад, если ошибка
         if st.button("🔙 Назад к сканированию", use_container_width=True):
             st.session_state.step = 'scan'
             st.rerun()
-        return
+        # Важно: здесь нет return, просто пропускаем остальной код
     
-    imei_input = st.text_input(label, placeholder=placeholder, key="imei_input")
-    
-    if imei_input:
-        # Проверка формата
-        if imei_input == '0' or re.match(r'^\d{15}$', imei_input):
-            # Проверка на дублирование с уже введенным IMEI
-            if len(st.session_state.imeis) == 1 and imei_input != '0':
-                first_imei = st.session_state.imeis[0]
-                if imei_input == first_imei:
-                    st.error("❌ IMEI не могут быть одинаковыми! Введите другой IMEI.")
+    # Этот блок выполняется только если current < 2 (мы не сохранили еще)
+    if current < 2:
+        imei_input = st.text_input(label, placeholder=placeholder, key="imei_input")
+        
+        if imei_input:
+            # Проверка формата
+            if imei_input == '0' or re.match(r'^\d{15}$', imei_input):
+                # Проверка на дублирование с уже введенным IMEI
+                if len(st.session_state.imeis) == 1 and imei_input != '0':
+                    first_imei = st.session_state.imeis[0]
+                    if imei_input == first_imei:
+                        st.error("❌ IMEI не могут быть одинаковыми! Введите другой IMEI.")
+                    else:
+                        st.session_state.imeis.append(imei_input)
+                        st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
+                        st.rerun()
                 else:
                     st.session_state.imeis.append(imei_input)
                     st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
                     st.rerun()
             else:
-                st.session_state.imeis.append(imei_input)
-                st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
-                st.rerun()
-        else:
-            st.error("❌ Введите 15 цифр или 0")
-    
-    if st.button("🔙 Назад", use_container_width=True):
-        st.session_state.step = 'scan'
-        st.rerun()
+                st.error("❌ Введите 15 цифр или 0")
+        
+        if st.button("🔙 Назад", use_container_width=True):
+            st.session_state.step = 'scan'
+            st.rerun()
 
 # --- ЗАВЕРШЕНИЕ ---
 elif st.session_state.step == 'finish':
