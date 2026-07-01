@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
-import pytz
+from datetime import datetime, timedelta
 import re
 
 # --- НАСТРОЙКА СТРАНИЦЫ ---
@@ -77,37 +76,12 @@ st.markdown("""
         border-left: 5px solid #888;
         opacity: 0.7;
     }
-    /* Успешное сканирование */
-    .scan-success {
-        background: #d4edda;
-        border-radius: 10px;
-        padding: 10px;
-        margin: 5px 0;
-    }
-    .scan-error {
-        background: #f8d7da;
-        border-radius: 10px;
-        padding: 10px;
-        margin: 5px 0;
-    }
     /* Время */
     .time-display {
         text-align: center;
         color: #666;
         font-size: 18px !important;
         margin: 5px 0;
-    }
-    /* Кнопка "Назад" делаем меньше */
-    .back-button button {
-        font-size: 20px !important;
-        height: 50px !important;
-        background: #6c757d !important;
-    }
-    /* Контейнер для кнопок */
-    .button-container {
-        display: flex;
-        gap: 10px;
-        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -178,28 +152,51 @@ def load_all_data():
         st.error(f"❌ Ошибка загрузки: {e}")
         return None, None, None
 
-# --- ФУНКЦИЯ СОХРАНЕНИЯ В GOOGLE SHEETS (АВТОСОХРАНЕНИЕ) ---
+# --- ПОЛУЧЕНИЕ ТАШКЕНТСКОГО ВРЕМЕНИ ---
+def get_tashkent_time():
+    tashkent_time = datetime.utcnow() + timedelta(hours=5)
+    return tashkent_time.strftime("%Y-%m-%d %H:%M:%S")
+
+# --- ФУНКЦИЯ СОХРАНЕНИЯ В GOOGLE SHEETS ---
 def save_to_gsheet(record):
-    """Автоматически сохраняет каждое сканирование в Google Sheets"""
     try:
         sh = connect_to_gsheet()
         if sh is None:
             return False
         
-        # Создаем или получаем вкладку для лога сканирований
+        # Сохраняем в основную таблицу "Остатки" - обновляем IMEI
+        try:
+            worksheet_stock = sh.worksheet("Остатки")
+            stock_data = worksheet_stock.get_all_values()
+            
+            # Ищем строку с нужным артикулом и местом
+            for i, row in enumerate(stock_data):
+                if len(row) >= 3:
+                    place = str(row[0]).strip() if len(row) > 0 else ''
+                    article = str(row[2]).strip() if len(row) > 2 else ''
+                    if place == str(record.get('Место', '')).strip() and article == str(record.get('Артикул/Код OZON', '')).strip():
+                        # Обновляем IMEI1 и IMEI2
+                        # Индексы: 0-Место, 1-Наименование, 2-Артикул, 3-Кол-во, 4-№ поставки, 5-№ ГТД, 6-Имеи, 7-Длина, 8-Ширина, 9-Высота, 10-вес, 11-Имеи1, 12-Имеи2
+                        if len(row) > 11:
+                            worksheet_stock.update_cell(i+1, 12, record.get('Имеи1', ''))
+                        if len(row) > 12:
+                            worksheet_stock.update_cell(i+1, 13, record.get('Имеи2', ''))
+                        break
+        except Exception as e:
+            st.error(f"❌ Ошибка обновления остатков: {e}")
+        
+        # Сохраняем в лог сканирований
         log_name = "Лог_сканирований"
         try:
             ws = sh.worksheet(log_name)
         except:
             ws = sh.add_worksheet(title=log_name, rows="10000", cols="20")
-            # Заголовки
             headers = ['Номер заказа', 'Наименование товара', 'Артикул/Код OZON', 
                       'Кол-во', '№ поставки', '№ ГТД', 'Имеи', 'Длина', 'Ширина', 
                       'Высота', 'вес', 'Имеи1', 'Имеи2', 'Время отбора', 'Место', 
                       'Баркод', 'IMEI']
             ws.append_row(headers)
         
-        # Формируем строку
         row = [
             record.get('Номер заказа', ''),
             record.get('Наименование товара', ''),
@@ -224,11 +221,6 @@ def save_to_gsheet(record):
     except Exception as e:
         st.error(f"❌ Ошибка сохранения: {e}")
         return False
-
-# --- ПОЛУЧЕНИЕ ТАШКЕНТСКОГО ВРЕМЕНИ ---
-def get_tashkent_time():
-    tz = pytz.timezone('Asia/Tashkent')
-    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 # --- ФУНКЦИИ ПОИСКА ---
 def find_task(tasks_df, cell):
@@ -270,8 +262,6 @@ if 'cell_number' not in st.session_state:
     st.session_state.cell_number = ""
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
-if 'saved_orders' not in st.session_state:
-    st.session_state.saved_orders = []  # Для отслеживания сохраненных заказов
 
 # --- ЗАГРУЗКА ДАННЫХ ---
 if not st.session_state.data_loaded:
@@ -288,10 +278,8 @@ if not st.session_state.data_loaded:
 if st.session_state.step == 'main':
     st.title("📦 Сборка заказов")
     
-    # Индикатор времени
     st.markdown(f'<div class="time-display">🕐 {get_tashkent_time()}</div>', unsafe_allow_html=True)
     
-    # Кнопка обновления
     col1, col2 = st.columns([4, 1])
     with col2:
         if st.button("🔄", use_container_width=True):
@@ -304,7 +292,6 @@ if st.session_state.step == 'main':
     if st.session_state.tasks_df is not None and not st.session_state.tasks_df.empty:
         st.subheader("📋 Задания")
         
-        # Фильтруем уже выполненные заказы
         completed_orders = [c.get('Номер заказа') for c in st.session_state.completed]
         
         for idx, row in st.session_state.tasks_df.iterrows():
@@ -316,7 +303,7 @@ if st.session_state.step == 'main':
                     <div class="task-card">
                         <b>📍 {row['Место']}</b><br>
                         <b>{row['Наименование товара']}</b><br>
-                        <small>Заказ: {row['Номер заказа']}</small>
+                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small>
                     </div>
                     """, unsafe_allow_html=True)
                     if st.button(f"▶️ Взять в работу", key=f"btn_{idx}", use_container_width=True):
@@ -358,24 +345,20 @@ elif st.session_state.step == 'scan':
             st.session_state.step = 'main'
             st.rerun()
     else:
-        # Заголовок
         st.markdown(f'<h2>📍 {task["Место"]}</h2>', unsafe_allow_html=True)
         st.markdown(f'<div class="time-display">🕐 {get_tashkent_time()}</div>', unsafe_allow_html=True)
         
-        # Информация о товаре
         col1, col2 = st.columns(2)
         with col1:
             st.metric("📦 Товар", task['Наименование товара'][:25] + "...")
         with col2:
             st.metric("📱 Артикул", task['Артикул/Код OZON'])
         
-        # Прогресс
         total = int(task['Кол-во'])
         scanned = len(st.session_state.scanned)
         st.progress(scanned / total if total > 0 else 0)
         st.caption(f"📊 Отсканировано: {scanned} из {total}")
         
-        # Поле для сканирования
         barcode = st.text_input("📷 Сканируйте баркод", placeholder="Наведите сканер...", key="barcode_input")
         
         if barcode:
@@ -390,7 +373,7 @@ elif st.session_state.step == 'scan':
                     st.rerun()
                 else:
                     if len(st.session_state.scanned) >= total:
-                        # Автосохранение
+                        # Сохраняем без IMEI
                         record = {
                             'Номер заказа': task['Номер заказа'],
                             'Наименование товара': task['Наименование товара'],
@@ -419,7 +402,6 @@ elif st.session_state.step == 'scan':
             else:
                 st.error("❌ Неверный баркод")
         
-        # Кнопки
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🔙 Назад", use_container_width=True):
@@ -461,21 +443,36 @@ elif st.session_state.step == 'imei':
     st.write(f"**{task['Наименование товара']}**")
     st.markdown(f'<div class="time-display">🕐 {get_tashkent_time()}</div>', unsafe_allow_html=True)
     
-    # Определяем сколько IMEI нужно ввести (всегда 2, если есть)
+    # Определяем, сколько IMEI нужно ввести
+    # Всегда запрашиваем 2 IMEI, если второй нет - вводим 0
     current = len(st.session_state.imeis)
     
     if current == 0:
         st.write("**Введите IMEI 1**")
         label = "IMEI 1"
         placeholder = "Введите 15 цифр"
+        st.info("ℹ️ Введите первый IMEI (15 цифр)")
     elif current == 1:
-        st.write("**Введите IMEI 2 (или 0, если нет)**")
+        st.write("**Введите IMEI 2**")
         label = "IMEI 2"
-        placeholder = "15 цифр или 0"
+        placeholder = "Введите 15 цифр или 0"
+        st.info("ℹ️ Введите второй IMEI (15 цифр) или 0, если его нет")
     else:
         # Все IMEI введены - сохраняем
         task = st.session_state.current_task
         stock = st.session_state.current_stock
+        
+        # Проверяем уникальность IMEI
+        imei1 = st.session_state.imeis[0] if len(st.session_state.imeis) > 0 else ''
+        imei2 = st.session_state.imeis[1] if len(st.session_state.imeis) > 1 else ''
+        
+        # Если оба IMEI есть и они одинаковые - ошибка
+        if imei1 and imei2 and imei1 != '0' and imei2 != '0' and imei1 == imei2:
+            st.error("❌ IMEI не могут быть одинаковыми! Вернитесь и введите разные IMEI.")
+            if st.button("🔙 Вернуться к вводу IMEI", use_container_width=True):
+                st.session_state.imeis = []
+                st.rerun()
+            return
         
         record = {
             'Номер заказа': task['Номер заказа'],
@@ -489,25 +486,40 @@ elif st.session_state.step == 'imei':
             'Ширина': stock.get('Ширина', '') if stock is not None else '',
             'Высота': stock.get('Высота', '') if stock is not None else '',
             'вес': stock.get('вес', '') if stock is not None else '',
-            'Имеи1': st.session_state.imeis[0] if len(st.session_state.imeis) > 0 else '',
-            'Имеи2': st.session_state.imeis[1] if len(st.session_state.imeis) > 1 else '',
+            'Имеи1': imei1,
+            'Имеи2': imei2 if imei2 != '0' else '',
             'Время отбора': get_tashkent_time(),
             'Место': st.session_state.cell_number,
             'Баркод': '',
-            'IMEI': ', '.join(st.session_state.imeis)
+            'IMEI': f"{imei1}, {imei2}" if imei2 and imei2 != '0' else imei1
         }
-        save_to_gsheet(record)
-        st.session_state.completed.append(record)
-        st.session_state.step = 'finish'
-        st.rerun()
+        
+        if save_to_gsheet(record):
+            st.success("✅ Данные сохранены в Google Sheets!")
+            st.session_state.completed.append(record)
+            st.session_state.step = 'finish'
+            st.rerun()
+        else:
+            st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
     
     imei_input = st.text_input(label, placeholder=placeholder, key="imei_input")
     
     if imei_input:
+        # Проверка формата
         if imei_input == '0' or re.match(r'^\d{15}$', imei_input):
-            st.session_state.imeis.append(imei_input)
-            st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
-            st.rerun()
+            # Проверка на дублирование с уже введенным IMEI
+            if len(st.session_state.imeis) == 1 and imei_input != '0':
+                first_imei = st.session_state.imeis[0]
+                if imei_input == first_imei:
+                    st.error("❌ IMEI не могут быть одинаковыми! Введите другой IMEI.")
+                else:
+                    st.session_state.imeis.append(imei_input)
+                    st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
+                    st.rerun()
+            else:
+                st.session_state.imeis.append(imei_input)
+                st.success(f"✅ IMEI {len(st.session_state.imeis)} сохранен")
+                st.rerun()
         else:
             st.error("❌ Введите 15 цифр или 0")
     
@@ -532,7 +544,6 @@ elif st.session_state.step == 'finish':
         </div>
         """, unsafe_allow_html=True)
     
-    # Кнопки
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📋 Следующее", use_container_width=True):
@@ -556,7 +567,6 @@ elif st.session_state.step == 'report':
         df = pd.DataFrame(st.session_state.completed)
         st.dataframe(df, use_container_width=True)
         
-        # Скачать CSV
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
             "📥 Скачать отчет",
