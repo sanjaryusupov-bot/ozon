@@ -206,7 +206,7 @@ def load_all_data():
         else:
             ref_df = pd.DataFrame(columns=['Наименования', 'Артикул/Код OZON', 'Цена', 'Длина', 'Ширина', 'Высота', 'вес'])
         
-        # Лог сканирований - загружаем все выполненные заказы
+        # Лог сканирований
         log_df = None
         completed_orders_from_log = []
         try:
@@ -215,7 +215,6 @@ def load_all_data():
             if len(log_data) > 1:
                 log_df = pd.DataFrame(log_data[1:], columns=log_data[0])
                 log_df.columns = log_df.columns.str.strip()
-                # Собираем уникальные номера заказов из лога
                 if 'Номер заказа' in log_df.columns:
                     completed_orders_from_log = log_df['Номер заказа'].astype(str).str.strip().tolist()
                     completed_orders_from_log = [x for x in completed_orders_from_log if x and x != 'nan']
@@ -302,7 +301,7 @@ def check_imei_unique(log_df, order_number, imei1, imei2):
     
     return True, ""
 
-# --- ФУНКЦИИ ПОИСКА ---
+# --- ФУНКЦИИ ПОИСКА (ИСПРАВЛЕНЫ) ---
 def find_task(tasks_df, cell):
     try:
         if tasks_df is None or tasks_df.empty:
@@ -312,14 +311,29 @@ def find_task(tasks_df, cell):
     except:
         return None
 
-def find_stock(stock_df, article):
+def find_stock_by_place_and_article(stock_df, place, article):
+    """Ищет товар в остатках по месту и артикулу одновременно"""
     try:
         if stock_df is None or stock_df.empty:
             return None
-        items = stock_df[stock_df['Артикул/Код OZON'].astype(str).str.strip() == str(article).strip()]
+        # Ищем точное совпадение по месту и артикулу
+        items = stock_df[
+            (stock_df['Место'].astype(str).str.strip() == str(place).strip()) & 
+            (stock_df['Артикул/Код OZON'].astype(str).str.strip() == str(article).strip())
+        ]
         return items.iloc[0] if not items.empty else None
     except:
         return None
+
+def get_stock_items_by_place(stock_df, place):
+    """Возвращает все товары на указанном месте"""
+    try:
+        if stock_df is None or stock_df.empty:
+            return pd.DataFrame()
+        items = stock_df[stock_df['Место'].astype(str).str.strip() == str(place).strip()]
+        return items
+    except:
+        return pd.DataFrame()
 
 # --- ИНИЦИАЛИЗАЦИЯ СЕССИИ ---
 if 'tasks_df' not in st.session_state:
@@ -335,7 +349,7 @@ if 'current_task' not in st.session_state:
 if 'current_stock' not in st.session_state:
     st.session_state.current_stock = None
 if 'scanned_items' not in st.session_state:
-    st.session_state.scanned_items = []  # Список отсканированных баркодов
+    st.session_state.scanned_items = []
 if 'imeis' not in st.session_state:
     st.session_state.imeis = []
 if 'completed' not in st.session_state:
@@ -345,9 +359,9 @@ if 'cell_number' not in st.session_state:
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'completed_orders' not in st.session_state:
-    st.session_state.completed_orders = []  # Заказы из лога
+    st.session_state.completed_orders = []
 if 'order_completed' not in st.session_state:
-    st.session_state.order_completed = False  # Флаг выполнения текущего заказа
+    st.session_state.order_completed = False
 
 # --- ЗАГРУЗКА ДАННЫХ ---
 if not st.session_state.data_loaded:
@@ -378,12 +392,10 @@ if st.session_state.step == 'main':
     st.divider()
     
     if st.session_state.tasks_df is not None and not st.session_state.tasks_df.empty:
-        # Получаем выполненные заказы из лога и сессии
         completed_from_log = st.session_state.completed_orders
         completed_from_session = [c.get('Номер заказа') for c in st.session_state.completed]
         all_completed = list(set(completed_from_log + completed_from_session))
         
-        # Фильтруем только активные задания
         active_tasks = st.session_state.tasks_df[~st.session_state.tasks_df['Номер заказа'].isin(all_completed)]
         
         if not active_tasks.empty:
@@ -397,14 +409,20 @@ if st.session_state.step == 'main':
                     <div class="task-card">
                         <b>📍 {row['Место']}</b><br>
                         <b>{row['Наименование товара']}</b><br>
-                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small>
+                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small><br>
+                        <small>Артикул: {row['Артикул/Код OZON']}</small>
                     </div>
                     """, unsafe_allow_html=True)
                     if st.button(f"▶️ Взять в работу", key=f"btn_{idx}", use_container_width=True):
                         st.session_state.cell_number = row['Место']
                         task = find_task(st.session_state.tasks_df, row['Место'])
                         if task is not None:
-                            stock = find_stock(st.session_state.stock_df, task['Артикул/Код OZON'])
+                            # Ищем товар в остатках по месту и артикулу
+                            stock = find_stock_by_place_and_article(
+                                st.session_state.stock_df, 
+                                row['Место'], 
+                                task['Артикул/Код OZON']
+                            )
                             if stock is not None:
                                 st.session_state.current_task = task
                                 st.session_state.current_stock = stock
@@ -414,7 +432,7 @@ if st.session_state.step == 'main':
                                 st.session_state.step = 'scan'
                                 st.rerun()
                             else:
-                                st.error(f"❌ Товар не найден в остатках")
+                                st.error(f"❌ Товар с артикулом {task['Артикул/Код OZON']} не найден на месте {row['Место']}")
         else:
             st.markdown("""
             <div style="text-align: center; padding: 40px 20px;">
@@ -475,36 +493,29 @@ elif st.session_state.step == 'scan':
         total = int(task['Кол-во'])
         scanned_count = len(st.session_state.scanned_items)
         
-        # Прогресс
         st.progress(scanned_count / total if total > 0 else 0)
         st.caption(f"📊 Отсканировано: {scanned_count} из {total}")
         
-        # Показываем отсканированные баркоды
         if st.session_state.scanned_items:
             st.write("**✅ Отсканированные баркоды:**")
             for i, item in enumerate(st.session_state.scanned_items, 1):
                 st.markdown(f'<div class="scanned-item">#{i} {item} ✅</div>', unsafe_allow_html=True)
         
-        # Поле для сканирования
         barcode = st.text_input("📷 Введите баркод", placeholder="Наведите сканер...", key="barcode_input")
         
         if barcode:
             expected_barcode = str(task['Артикул/Код OZON']).strip()
             if barcode.strip() == expected_barcode:
-                # Проверяем, не отсканирован ли уже этот баркод
                 if barcode not in st.session_state.scanned_items:
                     st.session_state.scanned_items.append(barcode)
                     st.success(f"✅ Баркод принят! ({len(st.session_state.scanned_items)}/{total})")
                     
-                    # Проверяем, все ли баркоды отсканированы
                     if len(st.session_state.scanned_items) >= total:
-                        # Все баркоды отсканированы
                         if stock is not None and stock.get('Имеи', '').lower() == 'да':
                             st.session_state.imeis = []
                             st.session_state.step = 'imei'
                             st.rerun()
                         else:
-                            # Сохраняем без IMEI
                             record = {
                                 'Номер заказа': str(task['Номер заказа']),
                                 'Наименование товара': str(task['Наименование товара']),
@@ -648,7 +659,6 @@ elif st.session_state.step == 'imei':
             st.rerun()
     
     else:
-        # Все IMEI введены - сохраняем
         imei1 = st.session_state.imeis[0] if len(st.session_state.imeis) > 0 else ''
         imei2 = st.session_state.imeis[1] if len(st.session_state.imeis) > 1 else ''
         imei2_final = '' if imei2 == '0' else imei2
@@ -711,7 +721,6 @@ elif st.session_state.step == 'finish':
     </div>
     """, unsafe_allow_html=True)
     
-    # Статистика
     total_tasks = len(st.session_state.tasks_df) if st.session_state.tasks_df is not None else 0
     done_tasks = len(st.session_state.completed_orders)
     remaining = total_tasks - done_tasks
