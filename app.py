@@ -4,7 +4,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 import re
-import time
 import random
 
 # --- НАСТРОЙКА СТРАНИЦЫ ---
@@ -94,6 +93,15 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         border-left: 5px solid #4CAF50;
     }
+    .task-card-done {
+        background: #f0f8f0;
+        border-radius: 15px;
+        padding: 20px;
+        margin: 10px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        border-left: 5px solid #888;
+        opacity: 0.7;
+    }
     .time-display {
         text-align: center;
         color: #666;
@@ -124,6 +132,13 @@ st.markdown("""
         background: #f8f9fa;
         border-radius: 10px;
     }
+    .scanned-item {
+        background: #e8f5e9;
+        border-radius: 10px;
+        padding: 10px;
+        margin: 5px 0;
+        border-left: 3px solid #4CAF50;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -144,7 +159,7 @@ def connect_to_gsheet():
         st.error(f"❌ Ошибка: {e}")
         return None
 
-# --- ЗАГРУЗКА ДАННЫХ (ИСПРАВЛЕНА) ---
+# --- ЗАГРУЗКА ДАННЫХ ---
 @st.cache_data(ttl=30)
 def load_all_data():
     sh = connect_to_gsheet()
@@ -152,16 +167,14 @@ def load_all_data():
         return None, None, None, None
     
     try:
-        # Задания - правильно загружаем артикулы как строки
+        # Задания
         worksheet_tasks = sh.worksheet("Отбор")
         tasks_data = worksheet_tasks.get_all_values()
         if len(tasks_data) > 1:
             tasks_df = pd.DataFrame(tasks_data[1:], columns=tasks_data[0])
             tasks_df.columns = tasks_df.columns.str.strip()
             tasks_df['Кол-во'] = pd.to_numeric(tasks_df['Кол-во'], errors='coerce').fillna(1).astype(int)
-            # ВАЖНО: артикул загружаем как строку БЕЗ потери данных
             tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].astype(str).str.strip()
-            # Удаляем .0 в конце если есть (но только если это действительно .0)
             tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].str.replace(r'\.0$', '', regex=True)
         else:
             tasks_df = pd.DataFrame(columns=['Номер заказа', 'Артикул/Код OZON', 'Наименование товара', 'Место', 'Кол-во'])
@@ -193,21 +206,26 @@ def load_all_data():
         else:
             ref_df = pd.DataFrame(columns=['Наименования', 'Артикул/Код OZON', 'Цена', 'Длина', 'Ширина', 'Высота', 'вес'])
         
-        # Лог сканирований
+        # Лог сканирований - загружаем все выполненные заказы
         log_df = None
+        completed_orders_from_log = []
         try:
             worksheet_log = sh.worksheet("Лог_сканирований")
             log_data = worksheet_log.get_all_values()
             if len(log_data) > 1:
                 log_df = pd.DataFrame(log_data[1:], columns=log_data[0])
                 log_df.columns = log_df.columns.str.strip()
+                # Собираем уникальные номера заказов из лога
+                if 'Номер заказа' in log_df.columns:
+                    completed_orders_from_log = log_df['Номер заказа'].astype(str).str.strip().tolist()
+                    completed_orders_from_log = [x for x in completed_orders_from_log if x and x != 'nan']
         except:
             log_df = pd.DataFrame(columns=['Номер заказа', 'Имеи1', 'Имеи2'])
         
-        return tasks_df, stock_df, ref_df, log_df
+        return tasks_df, stock_df, ref_df, log_df, list(set(completed_orders_from_log))
     except Exception as e:
         st.error(f"❌ Ошибка загрузки: {e}")
-        return None, None, None, None
+        return None, None, None, None, []
 
 # --- ПОЛУЧЕНИЕ ТАШКЕНТСКОГО ВРЕМЕНИ ---
 def get_tashkent_time():
@@ -284,19 +302,6 @@ def check_imei_unique(log_df, order_number, imei1, imei2):
     
     return True, ""
 
-# --- ФУНКЦИЯ ПОЛУЧЕНИЯ ВЫПОЛНЕННЫХ ЗАКАЗОВ ---
-def get_completed_orders(log_df):
-    if log_df is None or log_df.empty:
-        return []
-    
-    completed = []
-    for _, row in log_df.iterrows():
-        order = str(row.get('Номер заказа', '')).strip()
-        if order and order != '' and order != 'nan':
-            completed.append(order)
-    
-    return list(set(completed))
-
 # --- ФУНКЦИИ ПОИСКА ---
 def find_task(tasks_df, cell):
     try:
@@ -329,8 +334,8 @@ if 'current_task' not in st.session_state:
     st.session_state.current_task = None
 if 'current_stock' not in st.session_state:
     st.session_state.current_stock = None
-if 'scanned' not in st.session_state:
-    st.session_state.scanned = []
+if 'scanned_items' not in st.session_state:
+    st.session_state.scanned_items = []  # Список отсканированных баркодов
 if 'imeis' not in st.session_state:
     st.session_state.imeis = []
 if 'completed' not in st.session_state:
@@ -339,26 +344,21 @@ if 'cell_number' not in st.session_state:
     st.session_state.cell_number = ""
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
-if 'barcode_scanned' not in st.session_state:
-    st.session_state.barcode_scanned = False
 if 'completed_orders' not in st.session_state:
-    st.session_state.completed_orders = []
+    st.session_state.completed_orders = []  # Заказы из лога
+if 'order_completed' not in st.session_state:
+    st.session_state.order_completed = False  # Флаг выполнения текущего заказа
 
 # --- ЗАГРУЗКА ДАННЫХ ---
 if not st.session_state.data_loaded:
     with st.spinner("Загрузка данных..."):
-        tasks, stock, ref, log = load_all_data()
+        tasks, stock, ref, log, completed = load_all_data()
         if tasks is not None:
             st.session_state.tasks_df = tasks
             st.session_state.stock_df = stock
             st.session_state.log_df = log
-            st.session_state.completed_orders = get_completed_orders(log)
+            st.session_state.completed_orders = completed
             st.session_state.data_loaded = True
-            
-            # Для отладки - показываем загруженные артикулы
-            st.sidebar.write("Загруженные артикулы:")
-            for idx, row in tasks.iterrows():
-                st.sidebar.write(f"{row['Место']}: {row['Артикул/Код OZON']}")
 
 # --- ОСНОВНОЙ ИНТЕРФЕЙС ---
 
@@ -378,10 +378,12 @@ if st.session_state.step == 'main':
     st.divider()
     
     if st.session_state.tasks_df is not None and not st.session_state.tasks_df.empty:
+        # Получаем выполненные заказы из лога и сессии
         completed_from_log = st.session_state.completed_orders
         completed_from_session = [c.get('Номер заказа') for c in st.session_state.completed]
         all_completed = list(set(completed_from_log + completed_from_session))
         
+        # Фильтруем только активные задания
         active_tasks = st.session_state.tasks_df[~st.session_state.tasks_df['Номер заказа'].isin(all_completed)]
         
         if not active_tasks.empty:
@@ -395,8 +397,7 @@ if st.session_state.step == 'main':
                     <div class="task-card">
                         <b>📍 {row['Место']}</b><br>
                         <b>{row['Наименование товара']}</b><br>
-                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small><br>
-                        <small>Артикул: {row['Артикул/Код OZON']}</small>
+                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small>
                     </div>
                     """, unsafe_allow_html=True)
                     if st.button(f"▶️ Взять в работу", key=f"btn_{idx}", use_container_width=True):
@@ -407,9 +408,9 @@ if st.session_state.step == 'main':
                             if stock is not None:
                                 st.session_state.current_task = task
                                 st.session_state.current_stock = stock
-                                st.session_state.scanned = []
+                                st.session_state.scanned_items = []
                                 st.session_state.imeis = []
-                                st.session_state.barcode_scanned = False
+                                st.session_state.order_completed = False
                                 st.session_state.step = 'scan'
                                 st.rerun()
                             else:
@@ -454,7 +455,7 @@ elif st.session_state.step == 'scan':
         with col2:
             st.metric("📱 Артикул", task['Артикул/Код OZON'])
         
-        # Показываем баркод из задания
+        # Показываем баркод
         barcode_full = str(task['Артикул/Код OZON']).strip()
         st.markdown(f'<div class="barcode-label">📷 Сканируйте баркод:</div>', unsafe_allow_html=True)
         
@@ -472,28 +473,38 @@ elif st.session_state.step == 'scan':
             """, unsafe_allow_html=True)
         
         total = int(task['Кол-во'])
-        scanned = len(st.session_state.scanned)
-        st.progress(scanned / total if total > 0 else 0)
-        st.caption(f"📊 Отсканировано: {scanned} из {total}")
+        scanned_count = len(st.session_state.scanned_items)
         
-        if st.session_state.barcode_scanned:
-            st.success("✅ Баркод успешно отсканирован!")
+        # Прогресс
+        st.progress(scanned_count / total if total > 0 else 0)
+        st.caption(f"📊 Отсканировано: {scanned_count} из {total}")
         
+        # Показываем отсканированные баркоды
+        if st.session_state.scanned_items:
+            st.write("**✅ Отсканированные баркоды:**")
+            for i, item in enumerate(st.session_state.scanned_items, 1):
+                st.markdown(f'<div class="scanned-item">#{i} {item} ✅</div>', unsafe_allow_html=True)
+        
+        # Поле для сканирования
         barcode = st.text_input("📷 Введите баркод", placeholder="Наведите сканер...", key="barcode_input")
         
         if barcode:
-            if barcode.strip() == str(task['Артикул/Код OZON']).strip():
-                if not st.session_state.barcode_scanned:
-                    st.session_state.scanned.append(barcode)
-                    st.session_state.barcode_scanned = True
-                    st.success(f"✅ Баркод принят! ({len(st.session_state.scanned)}/{total})")
+            expected_barcode = str(task['Артикул/Код OZON']).strip()
+            if barcode.strip() == expected_barcode:
+                # Проверяем, не отсканирован ли уже этот баркод
+                if barcode not in st.session_state.scanned_items:
+                    st.session_state.scanned_items.append(barcode)
+                    st.success(f"✅ Баркод принят! ({len(st.session_state.scanned_items)}/{total})")
                     
-                    if stock is not None and stock.get('Имеи', '').lower() == 'да':
-                        st.session_state.imeis = []
-                        st.session_state.step = 'imei'
-                        st.rerun()
-                    else:
-                        if len(st.session_state.scanned) >= total:
+                    # Проверяем, все ли баркоды отсканированы
+                    if len(st.session_state.scanned_items) >= total:
+                        # Все баркоды отсканированы
+                        if stock is not None and stock.get('Имеи', '').lower() == 'да':
+                            st.session_state.imeis = []
+                            st.session_state.step = 'imei'
+                            st.rerun()
+                        else:
+                            # Сохраняем без IMEI
                             record = {
                                 'Номер заказа': str(task['Номер заказа']),
                                 'Наименование товара': str(task['Наименование товара']),
@@ -513,14 +524,15 @@ elif st.session_state.step == 'scan':
                             if save_to_gsheet(record):
                                 st.session_state.completed.append(record)
                                 st.session_state.completed_orders.append(str(task['Номер заказа']))
+                                st.session_state.order_completed = True
                                 st.session_state.step = 'finish'
                                 st.rerun()
                             else:
                                 st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
-                        else:
-                            st.rerun()
+                    else:
+                        st.rerun()
                 else:
-                    st.warning("⚠️ Баркод уже отсканирован!")
+                    st.warning("⚠️ Этот баркод уже отсканирован!")
             else:
                 st.error("❌ Неверный баркод!")
         
@@ -530,31 +542,37 @@ elif st.session_state.step == 'scan':
                 st.session_state.step = 'main'
                 st.rerun()
         with col2:
-            if scanned >= total and st.session_state.barcode_scanned:
-                if st.button("✅ Завершить", use_container_width=True):
-                    record = {
-                        'Номер заказа': str(task['Номер заказа']),
-                        'Наименование товара': str(task['Наименование товара']),
-                        'Артикул/Код OZON': str(task['Артикул/Код OZON']),
-                        'Кол-во': str(task['Кол-во']),
-                        '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
-                        '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
-                        'Длина': str(stock.get('Длина', '')) if stock is not None else '',
-                        'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
-                        'Высота': str(stock.get('Высота', '')) if stock is not None else '',
-                        'вес': str(stock.get('вес', '')) if stock is not None else '',
-                        'Имеи1': '',
-                        'Имеи2': '',
-                        'Время отбора': get_tashkent_time(),
-                        'Место': str(st.session_state.cell_number)
-                    }
-                    if save_to_gsheet(record):
-                        st.session_state.completed.append(record)
-                        st.session_state.completed_orders.append(str(task['Номер заказа']))
-                        st.session_state.step = 'finish'
+            if scanned_count >= total:
+                if st.button("✅ Завершить сборку", use_container_width=True):
+                    if stock is not None and stock.get('Имеи', '').lower() == 'да':
+                        st.session_state.imeis = []
+                        st.session_state.step = 'imei'
                         st.rerun()
                     else:
-                        st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
+                        record = {
+                            'Номер заказа': str(task['Номер заказа']),
+                            'Наименование товара': str(task['Наименование товара']),
+                            'Артикул/Код OZON': str(task['Артикул/Код OZON']),
+                            'Кол-во': str(task['Кол-во']),
+                            '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
+                            '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
+                            'Длина': str(stock.get('Длина', '')) if stock is not None else '',
+                            'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
+                            'Высота': str(stock.get('Высота', '')) if stock is not None else '',
+                            'вес': str(stock.get('вес', '')) if stock is not None else '',
+                            'Имеи1': '',
+                            'Имеи2': '',
+                            'Время отбора': get_tashkent_time(),
+                            'Место': str(st.session_state.cell_number)
+                        }
+                        if save_to_gsheet(record):
+                            st.session_state.completed.append(record)
+                            st.session_state.completed_orders.append(str(task['Номер заказа']))
+                            st.session_state.order_completed = True
+                            st.session_state.step = 'finish'
+                            st.rerun()
+                        else:
+                            st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
 
 # --- ВВОД IMEI ---
 elif st.session_state.step == 'imei':
@@ -565,110 +583,106 @@ elif st.session_state.step == 'imei':
     st.write(f"**{task['Наименование товара']}**")
     st.markdown(f'<div class="time-display">🕐 {get_tashkent_time()}</div>', unsafe_allow_html=True)
     
-    if not st.session_state.barcode_scanned:
-        st.error("❌ Сначала отсканируйте баркод!")
-        if st.button("🔙 Вернуться к сканированию", use_container_width=True):
+    current = len(st.session_state.imeis)
+    
+    if current == 0:
+        st.write("**Введите IMEI 1**")
+        label = "IMEI 1"
+        placeholder = "Введите 15 цифр"
+        st.info("ℹ️ Введите первый IMEI (15 цифр)")
+        
+        imei_input = st.text_input(label, placeholder=placeholder, key="imei1_input")
+        
+        if imei_input:
+            if re.match(r'^\d{15}$', imei_input):
+                is_unique, msg = check_imei_unique(
+                    st.session_state.log_df, 
+                    task['Номер заказа'], 
+                    imei_input, 
+                    ''
+                )
+                if is_unique:
+                    st.session_state.imeis.append(imei_input)
+                    st.success(f"✅ IMEI 1 сохранен")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+            else:
+                st.error("❌ Введите 15 цифр")
+        
+        if st.button("🔙 Назад", use_container_width=True):
             st.session_state.step = 'scan'
             st.rerun()
-    else:
-        current = len(st.session_state.imeis)
+    
+    elif current == 1:
+        st.write("**Введите IMEI 2 (или 0, если нет)**")
+        label = "IMEI 2"
+        placeholder = "Введите 15 цифр или 0"
+        st.info("ℹ️ Введите второй IMEI (15 цифр) или 0, если его нет")
         
-        if current == 0:
-            st.write("**Введите IMEI 1**")
-            label = "IMEI 1"
-            placeholder = "Введите 15 цифр"
-            st.info("ℹ️ Введите первый IMEI (15 цифр)")
-            
-            imei_input = st.text_input(label, placeholder=placeholder, key="imei1_input")
-            
-            if imei_input:
-                if re.match(r'^\d{15}$', imei_input):
+        imei_input = st.text_input(label, placeholder=placeholder, key="imei2_input")
+        
+        if imei_input:
+            if imei_input == '0' or re.match(r'^\d{15}$', imei_input):
+                first_imei = st.session_state.imeis[0]
+                if imei_input != '0' and imei_input == first_imei:
+                    st.error("❌ IMEI не могут быть одинаковыми! Введите другой IMEI.")
+                else:
                     is_unique, msg = check_imei_unique(
                         st.session_state.log_df, 
                         task['Номер заказа'], 
-                        imei_input, 
-                        ''
+                        first_imei, 
+                        imei_input if imei_input != '0' else ''
                     )
                     if is_unique:
                         st.session_state.imeis.append(imei_input)
-                        st.success(f"✅ IMEI 1 сохранен")
+                        st.success(f"✅ IMEI 2 сохранен")
                         st.rerun()
                     else:
                         st.error(f"❌ {msg}")
-                else:
-                    st.error("❌ Введите 15 цифр")
-            
-            if st.button("🔙 Назад", use_container_width=True):
-                st.session_state.step = 'scan'
-                st.rerun()
-        
-        elif current == 1:
-            st.write("**Введите IMEI 2 (или 0, если нет)**")
-            label = "IMEI 2"
-            placeholder = "Введите 15 цифр или 0"
-            st.info("ℹ️ Введите второй IMEI (15 цифр) или 0, если его нет")
-            
-            imei_input = st.text_input(label, placeholder=placeholder, key="imei2_input")
-            
-            if imei_input:
-                if imei_input == '0' or re.match(r'^\d{15}$', imei_input):
-                    first_imei = st.session_state.imeis[0]
-                    if imei_input != '0' and imei_input == first_imei:
-                        st.error("❌ IMEI не могут быть одинаковыми! Введите другой IMEI.")
-                    else:
-                        is_unique, msg = check_imei_unique(
-                            st.session_state.log_df, 
-                            task['Номер заказа'], 
-                            first_imei, 
-                            imei_input if imei_input != '0' else ''
-                        )
-                        if is_unique:
-                            st.session_state.imeis.append(imei_input)
-                            st.success(f"✅ IMEI 2 сохранен")
-                            st.rerun()
-                        else:
-                            st.error(f"❌ {msg}")
-                else:
-                    st.error("❌ Введите 15 цифр или 0")
-            
-            if st.button("🔙 Назад", use_container_width=True):
-                st.session_state.step = 'scan'
-                st.rerun()
-        
-        else:
-            imei1 = st.session_state.imeis[0] if len(st.session_state.imeis) > 0 else ''
-            imei2 = st.session_state.imeis[1] if len(st.session_state.imeis) > 1 else ''
-            imei2_final = '' if imei2 == '0' else imei2
-            
-            record = {
-                'Номер заказа': str(task['Номер заказа']),
-                'Наименование товара': str(task['Наименование товара']),
-                'Артикул/Код OZON': str(task['Артикул/Код OZON']),
-                'Кол-во': str(task['Кол-во']),
-                '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
-                '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
-                'Длина': str(stock.get('Длина', '')) if stock is not None else '',
-                'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
-                'Высота': str(stock.get('Высота', '')) if stock is not None else '',
-                'вес': str(stock.get('вес', '')) if stock is not None else '',
-                'Имеи1': imei1,
-                'Имеи2': imei2_final,
-                'Время отбора': get_tashkent_time(),
-                'Место': str(st.session_state.cell_number)
-            }
-            
-            if save_to_gsheet(record):
-                st.success("✅ Данные сохранены в Google Sheets!")
-                st.session_state.completed.append(record)
-                st.session_state.completed_orders.append(str(task['Номер заказа']))
-                st.session_state.step = 'finish'
-                st.rerun()
             else:
-                st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
-            
-            if st.button("🔙 Назад к сканированию", use_container_width=True):
-                st.session_state.step = 'scan'
-                st.rerun()
+                st.error("❌ Введите 15 цифр или 0")
+        
+        if st.button("🔙 Назад", use_container_width=True):
+            st.session_state.step = 'scan'
+            st.rerun()
+    
+    else:
+        # Все IMEI введены - сохраняем
+        imei1 = st.session_state.imeis[0] if len(st.session_state.imeis) > 0 else ''
+        imei2 = st.session_state.imeis[1] if len(st.session_state.imeis) > 1 else ''
+        imei2_final = '' if imei2 == '0' else imei2
+        
+        record = {
+            'Номер заказа': str(task['Номер заказа']),
+            'Наименование товара': str(task['Наименование товара']),
+            'Артикул/Код OZON': str(task['Артикул/Код OZON']),
+            'Кол-во': str(task['Кол-во']),
+            '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
+            '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
+            'Длина': str(stock.get('Длина', '')) if stock is not None else '',
+            'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
+            'Высота': str(stock.get('Высота', '')) if stock is not None else '',
+            'вес': str(stock.get('вес', '')) if stock is not None else '',
+            'Имеи1': imei1,
+            'Имеи2': imei2_final,
+            'Время отбора': get_tashkent_time(),
+            'Место': str(st.session_state.cell_number)
+        }
+        
+        if save_to_gsheet(record):
+            st.success("✅ Данные сохранены в Google Sheets!")
+            st.session_state.completed.append(record)
+            st.session_state.completed_orders.append(str(task['Номер заказа']))
+            st.session_state.order_completed = True
+            st.session_state.step = 'finish'
+            st.rerun()
+        else:
+            st.error("❌ Ошибка сохранения. Попробуйте еще раз.")
+        
+        if st.button("🔙 Назад к сканированию", use_container_width=True):
+            st.session_state.step = 'scan'
+            st.rerun()
 
 # --- ЗАВЕРШЕНИЕ ---
 elif st.session_state.step == 'finish':
@@ -697,6 +711,7 @@ elif st.session_state.step == 'finish':
     </div>
     """, unsafe_allow_html=True)
     
+    # Статистика
     total_tasks = len(st.session_state.tasks_df) if st.session_state.tasks_df is not None else 0
     done_tasks = len(st.session_state.completed_orders)
     remaining = total_tasks - done_tasks
@@ -722,9 +737,9 @@ elif st.session_state.step == 'finish':
             st.session_state.step = 'main'
             st.session_state.current_task = None
             st.session_state.current_stock = None
-            st.session_state.scanned = []
+            st.session_state.scanned_items = []
             st.session_state.imeis = []
-            st.session_state.barcode_scanned = False
+            st.session_state.order_completed = False
             st.rerun()
     with col2:
         if st.button("📊 Отчет", use_container_width=True):
