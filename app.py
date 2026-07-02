@@ -45,7 +45,6 @@ st.markdown("""
         transform: scale(1.02) !important;
         box-shadow: 0 4px 12px rgba(0,0,0,0.2) !important;
     }
-    /* Увеличенный шрифт для баркода */
     .barcode-display {
         font-size: 42px !important;
         font-weight: bold !important;
@@ -95,32 +94,12 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         border-left: 5px solid #4CAF50;
     }
-    .task-card-done {
-        background: #f0f8f0;
-        border-radius: 15px;
-        padding: 20px;
-        margin: 10px 0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-        border-left: 5px solid #888;
-        opacity: 0.5;
-        display: none !important;
-    }
-    .task-card-log {
-        background: #fff3e0;
-        border-radius: 15px;
-        padding: 20px;
-        margin: 10px 0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        border-left: 5px solid #FF9800;
-        display: none !important;
-    }
     .time-display {
         text-align: center;
         color: #666;
         font-size: 18px !important;
         margin: 5px 0;
     }
-    /* Анимация завершения */
     @keyframes celebrate {
         0% { transform: scale(1); }
         50% { transform: scale(1.05); }
@@ -136,7 +115,6 @@ st.markdown("""
         font-size: 64px !important;
         text-align: center;
     }
-    /* Счетчик заданий */
     .task-counter {
         text-align: center;
         font-size: 24px !important;
@@ -166,7 +144,7 @@ def connect_to_gsheet():
         st.error(f"❌ Ошибка: {e}")
         return None
 
-# --- ЗАГРУЗКА ДАННЫХ ---
+# --- ЗАГРУЗКА ДАННЫХ (ИСПРАВЛЕНА) ---
 @st.cache_data(ttl=30)
 def load_all_data():
     sh = connect_to_gsheet()
@@ -174,14 +152,17 @@ def load_all_data():
         return None, None, None, None
     
     try:
-        # Задания
+        # Задания - правильно загружаем артикулы как строки
         worksheet_tasks = sh.worksheet("Отбор")
         tasks_data = worksheet_tasks.get_all_values()
         if len(tasks_data) > 1:
             tasks_df = pd.DataFrame(tasks_data[1:], columns=tasks_data[0])
             tasks_df.columns = tasks_df.columns.str.strip()
             tasks_df['Кол-во'] = pd.to_numeric(tasks_df['Кол-во'], errors='coerce').fillna(1).astype(int)
-            tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].astype(str).str.replace('.0', '', regex=False).str.strip()
+            # ВАЖНО: артикул загружаем как строку БЕЗ потери данных
+            tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].astype(str).str.strip()
+            # Удаляем .0 в конце если есть (но только если это действительно .0)
+            tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].str.replace(r'\.0$', '', regex=True)
         else:
             tasks_df = pd.DataFrame(columns=['Номер заказа', 'Артикул/Код OZON', 'Наименование товара', 'Место', 'Кол-во'])
         
@@ -191,7 +172,8 @@ def load_all_data():
         if len(stock_data) > 1:
             stock_df = pd.DataFrame(stock_data[1:], columns=stock_data[0])
             stock_df.columns = stock_df.columns.str.strip()
-            stock_df['Артикул/Код OZON'] = stock_df['Артикул/Код OZON'].astype(str).str.replace('.0', '', regex=False).str.strip()
+            stock_df['Артикул/Код OZON'] = stock_df['Артикул/Код OZON'].astype(str).str.strip()
+            stock_df['Артикул/Код OZON'] = stock_df['Артикул/Код OZON'].str.replace(r'\.0$', '', regex=True)
             stock_df['Кол-во'] = pd.to_numeric(stock_df['Кол-во'], errors='coerce')
             stock_df['Имеи'] = stock_df['Имеи'].astype(str).str.lower().str.strip()
         else:
@@ -203,7 +185,8 @@ def load_all_data():
         if len(ref_data) > 1:
             ref_df = pd.DataFrame(ref_data[1:], columns=ref_data[0])
             ref_df.columns = ref_df.columns.str.strip()
-            ref_df['Артикул/Код OZON'] = ref_df['Артикул/Код OZON'].astype(str).str.replace('.0', '', regex=False).str.strip()
+            ref_df['Артикул/Код OZON'] = ref_df['Артикул/Код OZON'].astype(str).str.strip()
+            ref_df['Артикул/Код OZON'] = ref_df['Артикул/Код OZON'].str.replace(r'\.0$', '', regex=True)
             for col in ['Длина', 'Ширина', 'Высота', 'вес']:
                 if col in ref_df.columns:
                     ref_df[col] = pd.to_numeric(ref_df[col], errors='coerce')
@@ -360,8 +343,6 @@ if 'barcode_scanned' not in st.session_state:
     st.session_state.barcode_scanned = False
 if 'completed_orders' not in st.session_state:
     st.session_state.completed_orders = []
-if 'celebration_show' not in st.session_state:
-    st.session_state.celebration_show = False
 
 # --- ЗАГРУЗКА ДАННЫХ ---
 if not st.session_state.data_loaded:
@@ -373,6 +354,11 @@ if not st.session_state.data_loaded:
             st.session_state.log_df = log
             st.session_state.completed_orders = get_completed_orders(log)
             st.session_state.data_loaded = True
+            
+            # Для отладки - показываем загруженные артикулы
+            st.sidebar.write("Загруженные артикулы:")
+            for idx, row in tasks.iterrows():
+                st.sidebar.write(f"{row['Место']}: {row['Артикул/Код OZON']}")
 
 # --- ОСНОВНОЙ ИНТЕРФЕЙС ---
 
@@ -392,18 +378,15 @@ if st.session_state.step == 'main':
     st.divider()
     
     if st.session_state.tasks_df is not None and not st.session_state.tasks_df.empty:
-        # Получаем список выполненных заказов из лога и сессии
         completed_from_log = st.session_state.completed_orders
         completed_from_session = [c.get('Номер заказа') for c in st.session_state.completed]
         all_completed = list(set(completed_from_log + completed_from_session))
         
-        # Фильтруем только активные задания (не выполненные)
         active_tasks = st.session_state.tasks_df[~st.session_state.tasks_df['Номер заказа'].isin(all_completed)]
         
         if not active_tasks.empty:
             st.subheader("📋 Активные задания")
             
-            # Показываем счетчик
             st.markdown(f'<div class="task-counter">📌 Осталось заданий: {len(active_tasks)}</div>', unsafe_allow_html=True)
             
             for idx, row in active_tasks.iterrows():
@@ -412,7 +395,8 @@ if st.session_state.step == 'main':
                     <div class="task-card">
                         <b>📍 {row['Место']}</b><br>
                         <b>{row['Наименование товара']}</b><br>
-                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small>
+                        <small>Заказ: {row['Номер заказа']} | Кол-во: {row['Кол-во']}</small><br>
+                        <small>Артикул: {row['Артикул/Код OZON']}</small>
                     </div>
                     """, unsafe_allow_html=True)
                     if st.button(f"▶️ Взять в работу", key=f"btn_{idx}", use_container_width=True):
@@ -431,7 +415,6 @@ if st.session_state.step == 'main':
                             else:
                                 st.error(f"❌ Товар не найден в остатках")
         else:
-            # Все задания выполнены!
             st.markdown("""
             <div style="text-align: center; padding: 40px 20px;">
                 <div class="emoji-big">🎉</div>
@@ -441,7 +424,6 @@ if st.session_state.step == 'main':
             </div>
             """, unsafe_allow_html=True)
             
-            # Показываем отчет
             if st.button("📊 Показать отчет", use_container_width=True):
                 st.session_state.step = 'report'
                 st.rerun()
@@ -472,20 +454,20 @@ elif st.session_state.step == 'scan':
         with col2:
             st.metric("📱 Артикул", task['Артикул/Код OZON'])
         
-        # Показываем баркод крупно с выделенными последними 4 цифрами
-        barcode_full = str(task['Артикул/Код OZON'])
+        # Показываем баркод из задания
+        barcode_full = str(task['Артикул/Код OZON']).strip()
+        st.markdown(f'<div class="barcode-label">📷 Сканируйте баркод:</div>', unsafe_allow_html=True)
+        
         if len(barcode_full) >= 4:
             barcode_first = barcode_full[:-4]
             barcode_last4 = barcode_full[-4:]
             st.markdown(f"""
-            <div class="barcode-label">📷 Сканируйте баркод:</div>
             <div class="barcode-display">
                 {barcode_first}<span class="barcode-last4">{barcode_last4}</span>
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
-            <div class="barcode-label">📷 Сканируйте баркод:</div>
             <div class="barcode-display">{barcode_full}</div>
             """, unsafe_allow_html=True)
         
@@ -692,7 +674,6 @@ elif st.session_state.step == 'imei':
 elif st.session_state.step == 'finish':
     task = st.session_state.current_task
     
-    # Интересная анимация вместо шаров
     emojis = ['🎉', '✨', '⭐', '🌟', '💫', '🎊', '🏆', '🥇']
     selected_emojis = random.sample(emojis, 4)
     
@@ -716,7 +697,6 @@ elif st.session_state.step == 'finish':
     </div>
     """, unsafe_allow_html=True)
     
-    # Показываем прогресс
     total_tasks = len(st.session_state.tasks_df) if st.session_state.tasks_df is not None else 0
     done_tasks = len(st.session_state.completed_orders)
     remaining = total_tasks - done_tasks
