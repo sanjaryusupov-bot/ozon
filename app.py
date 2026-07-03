@@ -159,12 +159,21 @@ def connect_to_gsheet():
         st.error(f"❌ Ошибка: {e}")
         return None
 
+# --- УНИКАЛЬНЫЙ ИДЕНТИФИКАТОР ЗАДАНИЯ ---
+# ВАЖНО: раньше задания отслеживались только по "Номер заказа".
+# Если в одном заказе было две разные позиции (два разных артикула/баркода)
+# на одном и том же месте — после сборки первой позиции из списка
+# пропадали ОБЕ. Теперь у каждой строки задания есть уникальный ID
+# = заказ + артикул + место, и отслеживание идёт по нему.
+def make_task_id(order, article, place):
+    return f"{str(order).strip()}|{str(article).strip()}|{str(place).strip()}"
+
 # --- ЗАГРУЗКА ДАННЫХ ---
 @st.cache_data(ttl=30)
 def load_all_data():
     sh = connect_to_gsheet()
     if sh is None:
-        return None, None, None, None
+        return None, None, None, None, []
     
     try:
         # Задания
@@ -176,8 +185,13 @@ def load_all_data():
             tasks_df['Кол-во'] = pd.to_numeric(tasks_df['Кол-во'], errors='coerce').fillna(1).astype(int)
             tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].astype(str).str.strip()
             tasks_df['Артикул/Код OZON'] = tasks_df['Артикул/Код OZON'].str.replace(r'\.0$', '', regex=True)
+            # Уникальный ID для каждой строки задания (заказ+артикул+место)
+            tasks_df['task_id'] = tasks_df.apply(
+                lambda r: make_task_id(r['Номер заказа'], r['Артикул/Код OZON'], r['Место']),
+                axis=1
+            )
         else:
-            tasks_df = pd.DataFrame(columns=['Номер заказа', 'Артикул/Код OZON', 'Наименование товара', 'Место', 'Кол-во'])
+            tasks_df = pd.DataFrame(columns=['Номер заказа', 'Артикул/Код OZON', 'Наименование товара', 'Место', 'Кол-во', 'task_id'])
         
         # Остатки
         worksheet_stock = sh.worksheet("Остатки")
@@ -208,20 +222,28 @@ def load_all_data():
         
         # Лог сканирований
         log_df = None
-        completed_orders_from_log = []
+        completed_task_ids_from_log = []
         try:
             worksheet_log = sh.worksheet("Лог_сканирований")
             log_data = worksheet_log.get_all_values()
             if len(log_data) > 1:
                 log_df = pd.DataFrame(log_data[1:], columns=log_data[0])
                 log_df.columns = log_df.columns.str.strip()
-                if 'Номер заказа' in log_df.columns:
-                    completed_orders_from_log = log_df['Номер заказа'].astype(str).str.strip().tolist()
-                    completed_orders_from_log = [x for x in completed_orders_from_log if x and x != 'nan']
+                required_cols = {'Номер заказа', 'Артикул/Код OZON', 'Место'}
+                if required_cols.issubset(set(log_df.columns)):
+                    for _, r in log_df.iterrows():
+                        tid = make_task_id(r['Номер заказа'], r['Артикул/Код OZON'], r['Место'])
+                        completed_task_ids_from_log.append(tid)
+                elif 'Номер заказа' in log_df.columns:
+                    # На случай старого формата лога без Артикула/Места в колонках
+                    completed_task_ids_from_log = log_df['Номер заказа'].astype(str).str.strip().tolist()
+                completed_task_ids_from_log = [x for x in completed_task_ids_from_log if x and x != 'nan']
         except:
-            log_df = pd.DataFrame(columns=['Номер заказа', 'Имеи1', 'Имеи2'])
+            log_df = pd.DataFrame(columns=['Номер заказа', 'Наименование товара', 'Артикул/Код OZON', 'Кол-во',
+                                            '№ поставки', '№ ГТД', 'Длина', 'Ширина', 'Высота', 'вес',
+                                            'Имеи1', 'Имеи2', 'Время отбора', 'Место'])
         
-        return tasks_df, stock_df, ref_df, log_df, list(set(completed_orders_from_log))
+        return tasks_df, stock_df, ref_df, log_df, list(set(completed_task_ids_from_log))
     except Exception as e:
         st.error(f"❌ Ошибка загрузки: {e}")
         return None, None, None, None, []
@@ -301,22 +323,12 @@ def check_imei_unique(log_df, order_number, imei1, imei2):
     
     return True, ""
 
-# --- ФУНКЦИИ ПОИСКА (ИСПРАВЛЕНЫ) ---
-def find_task(tasks_df, cell):
-    try:
-        if tasks_df is None or tasks_df.empty:
-            return None
-        task = tasks_df[tasks_df['Место'].astype(str).str.strip() == str(cell).strip()]
-        return task.iloc[0] if not task.empty else None
-    except:
-        return None
-
+# --- ФУНКЦИИ ПОИСКА ---
 def find_stock_by_place_and_article(stock_df, place, article):
     """Ищет товар в остатках по месту и артикулу одновременно"""
     try:
         if stock_df is None or stock_df.empty:
             return None
-        # Ищем точное совпадение по месту и артикулу
         items = stock_df[
             (stock_df['Место'].astype(str).str.strip() == str(place).strip()) & 
             (stock_df['Артикул/Код OZON'].astype(str).str.strip() == str(article).strip())
@@ -324,16 +336,6 @@ def find_stock_by_place_and_article(stock_df, place, article):
         return items.iloc[0] if not items.empty else None
     except:
         return None
-
-def get_stock_items_by_place(stock_df, place):
-    """Возвращает все товары на указанном месте"""
-    try:
-        if stock_df is None or stock_df.empty:
-            return pd.DataFrame()
-        items = stock_df[stock_df['Место'].astype(str).str.strip() == str(place).strip()]
-        return items
-    except:
-        return pd.DataFrame()
 
 # --- ИНИЦИАЛИЗАЦИЯ СЕССИИ ---
 if 'tasks_df' not in st.session_state:
@@ -346,6 +348,8 @@ if 'step' not in st.session_state:
     st.session_state.step = 'main'
 if 'current_task' not in st.session_state:
     st.session_state.current_task = None
+if 'current_task_id' not in st.session_state:
+    st.session_state.current_task_id = None
 if 'current_stock' not in st.session_state:
     st.session_state.current_stock = None
 if 'scanned_items' not in st.session_state:
@@ -358,8 +362,8 @@ if 'cell_number' not in st.session_state:
     st.session_state.cell_number = ""
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
-if 'completed_orders' not in st.session_state:
-    st.session_state.completed_orders = []
+if 'completed_task_ids' not in st.session_state:
+    st.session_state.completed_task_ids = []
 if 'order_completed' not in st.session_state:
     st.session_state.order_completed = False
 
@@ -371,7 +375,7 @@ if not st.session_state.data_loaded:
             st.session_state.tasks_df = tasks
             st.session_state.stock_df = stock
             st.session_state.log_df = log
-            st.session_state.completed_orders = completed
+            st.session_state.completed_task_ids = completed
             st.session_state.data_loaded = True
 
 # --- ОСНОВНОЙ ИНТЕРФЕЙС ---
@@ -392,11 +396,11 @@ if st.session_state.step == 'main':
     st.divider()
     
     if st.session_state.tasks_df is not None and not st.session_state.tasks_df.empty:
-        completed_from_log = st.session_state.completed_orders
-        completed_from_session = [c.get('Номер заказа') for c in st.session_state.completed]
+        completed_from_log = st.session_state.completed_task_ids
+        completed_from_session = [c.get('task_id') for c in st.session_state.completed]
         all_completed = list(set(completed_from_log + completed_from_session))
         
-        active_tasks = st.session_state.tasks_df[~st.session_state.tasks_df['Номер заказа'].isin(all_completed)]
+        active_tasks = st.session_state.tasks_df[~st.session_state.tasks_df['task_id'].isin(all_completed)]
         
         if not active_tasks.empty:
             st.subheader("📋 Активные задания")
@@ -413,26 +417,27 @@ if st.session_state.step == 'main':
                         <small>Артикул: {row['Артикул/Код OZON']}</small>
                     </div>
                     """, unsafe_allow_html=True)
-                    if st.button(f"▶️ Взять в работу", key=f"btn_{idx}", use_container_width=True):
+                    if st.button(f"▶️ Взять в работу", key=f"btn_{row['task_id']}", use_container_width=True):
                         st.session_state.cell_number = row['Место']
-                        task = find_task(st.session_state.tasks_df, row['Место'])
-                        if task is not None:
-                            # Ищем товар в остатках по месту и артикулу
-                            stock = find_stock_by_place_and_article(
-                                st.session_state.stock_df, 
-                                row['Место'], 
-                                task['Артикул/Код OZON']
-                            )
-                            if stock is not None:
-                                st.session_state.current_task = task
-                                st.session_state.current_stock = stock
-                                st.session_state.scanned_items = []
-                                st.session_state.imeis = []
-                                st.session_state.order_completed = False
-                                st.session_state.step = 'scan'
-                                st.rerun()
-                            else:
-                                st.error(f"❌ Товар с артикулом {task['Артикул/Код OZON']} не найден на месте {row['Место']}")
+                        # ВАЖНО: используем именно нажатую строку (row), а не повторный
+                        # поиск по "Место" — иначе при двух разных баркодах в одной
+                        # ячейке всегда открывалась бы первая позиция.
+                        stock = find_stock_by_place_and_article(
+                            st.session_state.stock_df, 
+                            row['Место'], 
+                            row['Артикул/Код OZON']
+                        )
+                        if stock is not None:
+                            st.session_state.current_task = row
+                            st.session_state.current_task_id = row['task_id']
+                            st.session_state.current_stock = stock
+                            st.session_state.scanned_items = []
+                            st.session_state.imeis = []
+                            st.session_state.order_completed = False
+                            st.session_state.step = 'scan'
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Товар с артикулом {row['Артикул/Код OZON']} не найден на месте {row['Место']}")
         else:
             st.markdown("""
             <div style="text-align: center; padding: 40px 20px;">
@@ -503,6 +508,25 @@ elif st.session_state.step == 'scan':
         
         barcode = st.text_input("📷 Введите баркод", placeholder="Наведите сканер...", key="barcode_input")
         
+        def build_record(imei1='', imei2=''):
+            return {
+                'task_id': st.session_state.current_task_id,
+                'Номер заказа': str(task['Номер заказа']),
+                'Наименование товара': str(task['Наименование товара']),
+                'Артикул/Код OZON': str(task['Артикул/Код OZON']),
+                'Кол-во': str(task['Кол-во']),
+                '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
+                '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
+                'Длина': str(stock.get('Длина', '')) if stock is not None else '',
+                'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
+                'Высота': str(stock.get('Высота', '')) if stock is not None else '',
+                'вес': str(stock.get('вес', '')) if stock is not None else '',
+                'Имеи1': imei1,
+                'Имеи2': imei2,
+                'Время отбора': get_tashkent_time(),
+                'Место': str(st.session_state.cell_number)
+            }
+        
         if barcode:
             expected_barcode = str(task['Артикул/Код OZON']).strip()
             if barcode.strip() == expected_barcode:
@@ -516,25 +540,10 @@ elif st.session_state.step == 'scan':
                             st.session_state.step = 'imei'
                             st.rerun()
                         else:
-                            record = {
-                                'Номер заказа': str(task['Номер заказа']),
-                                'Наименование товара': str(task['Наименование товара']),
-                                'Артикул/Код OZON': str(task['Артикул/Код OZON']),
-                                'Кол-во': str(task['Кол-во']),
-                                '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
-                                '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
-                                'Длина': str(stock.get('Длина', '')) if stock is not None else '',
-                                'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
-                                'Высота': str(stock.get('Высота', '')) if stock is not None else '',
-                                'вес': str(stock.get('вес', '')) if stock is not None else '',
-                                'Имеи1': '',
-                                'Имеи2': '',
-                                'Время отбора': get_tashkent_time(),
-                                'Место': str(st.session_state.cell_number)
-                            }
+                            record = build_record()
                             if save_to_gsheet(record):
                                 st.session_state.completed.append(record)
-                                st.session_state.completed_orders.append(str(task['Номер заказа']))
+                                st.session_state.completed_task_ids.append(st.session_state.current_task_id)
                                 st.session_state.order_completed = True
                                 st.session_state.step = 'finish'
                                 st.rerun()
@@ -560,25 +569,10 @@ elif st.session_state.step == 'scan':
                         st.session_state.step = 'imei'
                         st.rerun()
                     else:
-                        record = {
-                            'Номер заказа': str(task['Номер заказа']),
-                            'Наименование товара': str(task['Наименование товара']),
-                            'Артикул/Код OZON': str(task['Артикул/Код OZON']),
-                            'Кол-во': str(task['Кол-во']),
-                            '№ поставки': str(stock.get('№ поставки', '')) if stock is not None else '',
-                            '№ ГТД': str(stock.get('№ ГТД', '')) if stock is not None else '',
-                            'Длина': str(stock.get('Длина', '')) if stock is not None else '',
-                            'Ширина': str(stock.get('Ширина', '')) if stock is not None else '',
-                            'Высота': str(stock.get('Высота', '')) if stock is not None else '',
-                            'вес': str(stock.get('вес', '')) if stock is not None else '',
-                            'Имеи1': '',
-                            'Имеи2': '',
-                            'Время отбора': get_tashkent_time(),
-                            'Место': str(st.session_state.cell_number)
-                        }
+                        record = build_record()
                         if save_to_gsheet(record):
                             st.session_state.completed.append(record)
-                            st.session_state.completed_orders.append(str(task['Номер заказа']))
+                            st.session_state.completed_task_ids.append(st.session_state.current_task_id)
                             st.session_state.order_completed = True
                             st.session_state.step = 'finish'
                             st.rerun()
@@ -664,6 +658,7 @@ elif st.session_state.step == 'imei':
         imei2_final = '' if imei2 == '0' else imei2
         
         record = {
+            'task_id': st.session_state.current_task_id,
             'Номер заказа': str(task['Номер заказа']),
             'Наименование товара': str(task['Наименование товара']),
             'Артикул/Код OZON': str(task['Артикул/Код OZON']),
@@ -683,7 +678,7 @@ elif st.session_state.step == 'imei':
         if save_to_gsheet(record):
             st.success("✅ Данные сохранены в Google Sheets!")
             st.session_state.completed.append(record)
-            st.session_state.completed_orders.append(str(task['Номер заказа']))
+            st.session_state.completed_task_ids.append(st.session_state.current_task_id)
             st.session_state.order_completed = True
             st.session_state.step = 'finish'
             st.rerun()
@@ -722,8 +717,8 @@ elif st.session_state.step == 'finish':
     """, unsafe_allow_html=True)
     
     total_tasks = len(st.session_state.tasks_df) if st.session_state.tasks_df is not None else 0
-    done_tasks = len(st.session_state.completed_orders)
-    remaining = total_tasks - done_tasks
+    done_tasks = len(set(st.session_state.completed_task_ids))
+    remaining = max(total_tasks - done_tasks, 0)
     
     st.markdown(f"""
     <div style="background: #f8f9fa; border-radius: 15px; padding: 20px; margin: 10px 0;">
@@ -745,6 +740,7 @@ elif st.session_state.step == 'finish':
         if st.button("📋 Следующее", use_container_width=True):
             st.session_state.step = 'main'
             st.session_state.current_task = None
+            st.session_state.current_task_id = None
             st.session_state.current_stock = None
             st.session_state.scanned_items = []
             st.session_state.imeis = []
@@ -762,9 +758,10 @@ elif st.session_state.step == 'report':
     
     if st.session_state.completed:
         df = pd.DataFrame(st.session_state.completed)
-        st.dataframe(df, use_container_width=True)
+        display_cols = [c for c in df.columns if c != 'task_id']
+        st.dataframe(df[display_cols], use_container_width=True)
         
-        csv = df.to_csv(index=False).encode('utf-8')
+        csv = df[display_cols].to_csv(index=False).encode('utf-8')
         st.download_button(
             "📥 Скачать отчет",
             csv,
