@@ -644,7 +644,8 @@ elif st.session_state.step == 'scan':
             st.session_state.step = 'main'
             st.rerun()
     else:
-        st.markdown(f'<h2>📍 {task["Место"]}</h2>', unsafe_allow_html=True)
+        st.markdown(f'<div class="barcode-label">📍 Место</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="barcode-display">{task["Место"]}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="time-display">🕐 {get_tashkent_time()}</div>', unsafe_allow_html=True)
 
         col1, col2 = st.columns(2)
